@@ -26,7 +26,6 @@ class MainWindow(QMainWindow):
 
         layout = QHBoxLayout(container)
 
-        # 左侧菜单
         self.menu = QListWidget()
         self.menu.addItems([
             "Dashboard",
