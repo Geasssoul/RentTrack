@@ -86,7 +86,6 @@ def get_properties():
 
     return rows
 
-
 # -------------------------
 # Tenants
 # -------------------------
@@ -113,6 +112,24 @@ def add_tenant(name, phone, email, property_id):
             email,
             property_id
         )
+    )
+
+    conn.commit()
+    conn.close()
+
+def update_property(property_id, name, address):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE properties
+        SET name = ?, address = ?
+        WHERE id = ?
+        """,
+        (name, address, property_id)
     )
 
     conn.commit()
