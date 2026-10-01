@@ -1,0 +1,154 @@
+==============================
+V1.0
+使用说明
+
+本产品 V1.0 目前仅供个人测试使用。
+
+第一步：启动软件
+
+直接运行：
+
+RentTrack.exe
+
+第二步：记录房产
+
+进入 Properties：
+
+添加房产地址。
+保存房产信息。
+可以添加多个房产。
+
+第三步：记录租客
+
+进入 Tenants：
+
+先选择对应的房产。
+添加该房产的租客信息。
+保存租客信息。
+
+请先建立房产，再添加对应的租客。
+
+第四步：创建 Billing
+
+进入 Billing：
+
+选择对应的 Property（房产）。
+选择对应的 Tenant（租客）。
+创建新的 Bill。
+设置该账单的 开始日期和结束日期。
+创建账单后，再添加相关费用。
+
+例如：
+
+Rent
+Water
+Electricity
+Internet
+Gas
+Custom
+
+添加费用后，账单总金额会自动计算。
+
+第五步：Billing History
+
+进入 Billing History 可以：
+
+查看已经创建的账单
+查看账单金额
+查看 Paid / Outstanding
+查看账单详细内容
+修改账单
+删除账单
+导出账单 PDF
+
+如果发现：
+
+软件报错
+数据没有保存
+数据显示错误
+金额计算错误
+账单日期异常
+修改或删除功能异常
+PDF 导出异常
+任何不符合预期的操作
+
+请记录操作步骤 + 出现的问题 + 截图（如果方便），并反馈。
+
+==============================
+RentTrack V1.0 Guide
+==============================
+V1.0
+Usage Instructions
+
+RentTrack V1.0 is currently intended for personal testing purposes only.
+
+Step 1: Launch the Software
+
+Run:
+RentTrack.exe
+
+Step 2: Add Properties
+
+Go to Properties:
+
+Add a property address.
+Save the property information.
+Multiple properties can be added.
+
+Step 3: Add Tenants
+
+Go to Tenants:
+
+Select the relevant property.
+Add the tenant's information.
+Save the tenant information.
+
+Please create the property first before adding its tenant information.
+
+Step 4: Create a Bill
+
+Go to Billing:
+
+Select the relevant Property.
+Select the relevant Tenant.
+Create a new Bill.
+Set the start date and end date for the bill.
+After creating the bill, add the relevant charges.
+
+Available charge types include:
+
+Rent
+Water
+Electricity
+Internet
+Gas
+Custom
+
+After charges are added, the bill total will be calculated automatically.
+
+Step 5: Billing History
+
+Billing History allows you to:
+
+View created bills
+View bill amounts
+View Paid / Outstanding amounts
+View bill details
+Edit bills
+Delete bills
+Export bills as PDF
+
+If you encounter:
+
+Software errors
+Data not being saved
+Incorrect data display
+Incorrect amount calculations
+Incorrect billing dates
+Problems editing or deleting bills
+Problems exporting PDFs
+Any behaviour that does not work as expected
+
+Please record the steps you took + the issue you encountered + a screenshot (if possible) and provide the feedback.
+
+==============================
