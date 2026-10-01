@@ -1,9 +1,17 @@
 import sqlite3
+import os
 from pathlib import Path
 
 from migrations import migrate_database
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "rental.db"
+APP_DATA_DIR = Path(
+    os.environ.get(
+        "LOCALAPPDATA",
+        Path.home() / "AppData" / "Local"
+    )
+) / "RentTrack"
+
+DB_PATH = APP_DATA_DIR / "data" / "rental.db"
 
 
 def get_connection():
