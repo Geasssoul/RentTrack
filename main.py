@@ -10,8 +10,11 @@ from PyQt6.QtWidgets import (
     QStackedWidget
 )
 
+from pages.dashboard import DashboardPage
 from pages.properties import PropertiesPage
-
+from pages.tenants import TenantsPage
+from pages.billing import BillingPage
+from database import create_database
 
 class MainWindow(QMainWindow):
 
@@ -31,21 +34,20 @@ class MainWindow(QMainWindow):
             "Dashboard",
             "Properties",
             "Tenants",
-            "Invoices",
-            "Payments"
+            "Billing"
         ])
 
         # 右侧页面区域
         self.pages = QStackedWidget()
 
-        self.pages.addWidget(QLabel("Dashboard"))
+        self.pages.addWidget(DashboardPage())
         self.pages.addWidget(PropertiesPage())
-        self.pages.addWidget(QLabel("Tenants"))
-        self.pages.addWidget(QLabel("Invoices"))
-        self.pages.addWidget(QLabel("Payments"))
+        self.pages.addWidget(TenantsPage())
+        self.pages.addWidget(BillingPage())
+        # self.pages.addWidget(QLabel("Payments"))
 
         self.menu.currentRowChanged.connect(
-            self.pages.setCurrentIndex
+            self.change_page
         )
 
         layout.addWidget(self.menu, 1)
@@ -53,8 +55,19 @@ class MainWindow(QMainWindow):
 
         self.menu.setCurrentRow(0)
 
+    def change_page(self, index):
+        self.pages.setCurrentIndex(index)
+
+        page = self.pages.widget(index)
+
+        if hasattr(page, "refresh_data"):
+            page.refresh_data()
 
 app = QApplication(sys.argv)
+
+# Ensure the SQLite database and all required tables exist before
+# any page (especially Dashboard) tries to query the database.
+create_database()
 
 window = MainWindow()
 window.show()

@@ -1,164 +1,1016 @@
 import sqlite3
-import os
+from pathlib import Path
 
-DB_PATH = "data/rental.db"
+from migrations import migrate_database
 
-
-# 创建数据库
-def create_database():
-
-    os.makedirs("data", exist_ok=True)
-
-    conn = sqlite3.connect(DB_PATH)
-
-    cursor = conn.cursor()
-
-    # 房产
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS properties (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        address TEXT
-    )
-    """)
-
-    # 租客
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS tenants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        phone TEXT,
-        email TEXT,
-        property_id INTEGER
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-create_database()
+DB_PATH = Path(__file__).resolve().parent / "data" / "rental.db"
 
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def create_database():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Existing tables
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            address TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tenants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT,
+            email TEXT,
+            property_id INTEGER NOT NULL,
+            FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rent_agreements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            frequency TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Legacy billing tables are kept so an existing database is not broken.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS billing_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            property_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            status TEXT DEFAULT 'Draft',
+            FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS charges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            billing_period_id INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            FOREIGN KEY (billing_period_id) REFERENCES billing_periods(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            charge_id INTEGER NOT NULL,
+            tenant_id INTEGER,
+            payer_type TEXT NOT NULL DEFAULT 'tenant',
+            amount REAL NOT NULL,
+            FOREIGN KEY (charge_id) REFERENCES charges(id) ON DELETE CASCADE,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id INTEGER NOT NULL,
+            billing_period_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            payment_date TEXT NOT NULL,
+            note TEXT,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+            FOREIGN KEY (billing_period_id) REFERENCES billing_periods(id) ON DELETE CASCADE
+        )
+    """)
+
+    # New invoice-style billing structure.
+    # One Property can have many Tenants.
+    # Each Bill belongs to exactly one Tenant and one Property.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            property_id INTEGER NOT NULL,
+            tenant_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            created_date TEXT NOT NULL,
+            note TEXT,
+            FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE CASCADE,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bill_charges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_id INTEGER NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL CHECK(amount >= 0),
+            FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bill_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_id INTEGER NOT NULL,
+            amount REAL NOT NULL CHECK(amount > 0),
+            payment_date TEXT NOT NULL,
+            note TEXT,
+            FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bills_property_date
+        ON bills(property_id, start_date, end_date)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_bills_tenant_date
+        ON bills(tenant_id, start_date, end_date)
+    """)
+
+    conn.commit()
+
+    # Establish the current schema version or run any required migrations.
+    # A backup is created automatically before an actual schema change.
+    migrate_database(conn, DB_PATH)
+
+    conn.close()
 
 
 # -------------------------
 # Properties
 # -------------------------
 
-def add_property(name, address):
+def property_exists(address, exclude_property_id=None):
+    address = address.strip()
+
+    if not address:
+        return False
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        INSERT INTO properties(name, address)
-        VALUES(?, ?)
-        """,
-        (name, address)
-    )
+    if exclude_property_id is None:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM properties
+            WHERE LOWER(TRIM(address)) = LOWER(TRIM(?))
+            LIMIT 1
+            """,
+            (address,)
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM properties
+            WHERE LOWER(TRIM(address)) = LOWER(TRIM(?))
+              AND id != ?
+            LIMIT 1
+            """,
+            (address, exclude_property_id)
+        )
 
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def add_property(address):
+    address = address.strip()
+
+    if not address:
+        raise ValueError("Property address cannot be empty.")
+
+    if property_exists(address):
+        raise ValueError(
+            "A property with this address already exists."
+        )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO properties (name, address) VALUES (?, ?)",
+        (address, address)
+    )
+    property_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return property_id
+
+
+def get_properties():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, address FROM properties ORDER BY address"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def update_property(property_id, address):
+    address = address.strip()
+
+    if not address:
+        raise ValueError("Property address cannot be empty.")
+
+    if property_exists(
+        address,
+        exclude_property_id=property_id
+    ):
+        raise ValueError(
+            "A property with this address already exists."
+        )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE properties SET name = ?, address = ? WHERE id = ?",
+        (address, address, property_id)
+    )
     conn.commit()
     conn.close()
 
 
-def get_properties():
+def delete_property(property_id):
+    """
+    Delete a Property and all data belonging to it.
 
+    This is handled explicitly rather than relying only on SQLite
+    ON DELETE CASCADE, because an existing rental.db may have been created
+    before cascade foreign keys were added.
+    """
     conn = get_connection()
-
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        SELECT id, name, address
-        FROM properties
-        ORDER BY id DESC
-        """
-    )
+    try:
+        # New invoice-style billing data.
+        cursor.execute("""
+            DELETE FROM bill_payments
+            WHERE bill_id IN (
+                SELECT id FROM bills WHERE property_id = ?
+            )
+        """, (property_id,))
 
-    rows = cursor.fetchall()
+        cursor.execute("""
+            DELETE FROM bill_charges
+            WHERE bill_id IN (
+                SELECT id FROM bills WHERE property_id = ?
+            )
+        """, (property_id,))
 
-    conn.close()
+        cursor.execute(
+            "DELETE FROM bills WHERE property_id = ?",
+            (property_id,)
+        )
 
-    return rows
+        # Legacy billing data.
+        cursor.execute("""
+            DELETE FROM allocations
+            WHERE charge_id IN (
+                SELECT c.id
+                FROM charges c
+                JOIN billing_periods bp
+                  ON bp.id = c.billing_period_id
+                WHERE bp.property_id = ?
+            )
+        """, (property_id,))
+
+        cursor.execute("""
+            DELETE FROM charges
+            WHERE billing_period_id IN (
+                SELECT id FROM billing_periods WHERE property_id = ?
+            )
+        """, (property_id,))
+
+        cursor.execute("""
+            DELETE FROM payments
+            WHERE billing_period_id IN (
+                SELECT id FROM billing_periods WHERE property_id = ?
+            )
+        """, (property_id,))
+
+        cursor.execute(
+            "DELETE FROM billing_periods WHERE property_id = ?",
+            (property_id,)
+        )
+
+        # Tenant-related data.
+        cursor.execute("""
+            DELETE FROM rent_agreements
+            WHERE tenant_id IN (
+                SELECT id FROM tenants WHERE property_id = ?
+            )
+        """, (property_id,))
+
+        cursor.execute(
+            "DELETE FROM tenants WHERE property_id = ?",
+            (property_id,)
+        )
+
+        cursor.execute(
+            "DELETE FROM properties WHERE id = ?",
+            (property_id,)
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError("Property not found.")
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
 
 # -------------------------
 # Tenants
 # -------------------------
 
 def add_tenant(name, phone, email, property_id):
-
     conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO tenants (name, phone, email, property_id)
+        VALUES (?, ?, ?, ?)
+        """,
+        (name, phone, email, property_id)
+    )
+    conn.commit()
+    conn.close()
 
+
+def get_tenants(property_id=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if property_id is None:
+        cursor.execute("""
+            SELECT t.id, t.name, t.phone, t.email,
+                   t.property_id, p.address
+            FROM tenants t
+            JOIN properties p ON p.id = t.property_id
+            ORDER BY t.name
+        """)
+    else:
+        cursor.execute("""
+            SELECT t.id, t.name, t.phone, t.email,
+                   t.property_id, p.address
+            FROM tenants t
+            JOIN properties p ON p.id = t.property_id
+            WHERE t.property_id = ?
+            ORDER BY t.name
+        """, (property_id,))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def update_tenant(
+    tenant_id,
+    name,
+    phone,
+    email,
+    property_id
+):
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute(
         """
-        INSERT INTO tenants(
-            name,
-            phone,
-            email,
-            property_id
-        )
-        VALUES(?, ?, ?, ?)
+        UPDATE tenants
+        SET name = ?,
+            phone = ?,
+            email = ?,
+            property_id = ?
+        WHERE id = ?
         """,
         (
             name,
             phone,
             email,
-            property_id
+            property_id,
+            tenant_id
         )
     )
 
     conn.commit()
     conn.close()
 
-def update_property(property_id, name, address):
 
+def delete_tenant(tenant_id):
+    """
+    Delete a Tenant only when there are no invoice-style Bills.
+
+    Historical Bills are kept intact so they are not orphaned or silently
+    removed. A Tenant without Bills can still be deleted normally.
+    """
     conn = get_connection()
+    cursor = conn.cursor()
 
+    try:
+        cursor.execute(
+            "SELECT 1 FROM tenants WHERE id = ?",
+            (tenant_id,)
+        )
+        if cursor.fetchone() is None:
+            raise ValueError("Tenant not found.")
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM bills WHERE tenant_id = ?",
+            (tenant_id,)
+        )
+        bill_count = cursor.fetchone()[0]
+
+        if bill_count > 0:
+            raise ValueError(
+                f"Cannot delete this tenant because they have {bill_count} "
+                "existing bill(s). Keep the tenant to preserve billing history."
+            )
+
+        cursor.execute(
+            "DELETE FROM rent_agreements WHERE tenant_id = ?",
+            (tenant_id,)
+        )
+        cursor.execute(
+            "DELETE FROM allocations WHERE tenant_id = ?",
+            (tenant_id,)
+        )
+        cursor.execute(
+            "DELETE FROM payments WHERE tenant_id = ?",
+            (tenant_id,)
+        )
+        cursor.execute(
+            "DELETE FROM tenants WHERE id = ?",
+            (tenant_id,)
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# -------------------------
+# Rent agreements (kept for compatibility)
+# -------------------------
+
+def add_rent_agreement(tenant_id, amount, frequency, start_date, end_date=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO rent_agreements
+        (tenant_id, amount, frequency, start_date, end_date)
+        VALUES (?, ?, ?, ?, ?)
+    """, (tenant_id, amount, frequency, start_date, end_date))
+    conn.commit()
+    conn.close()
+
+
+def get_rent_agreements(tenant_id=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if tenant_id is None:
+        cursor.execute("""
+            SELECT id, tenant_id, amount, frequency, start_date, end_date
+            FROM rent_agreements
+            ORDER BY start_date DESC
+        """)
+    else:
+        cursor.execute("""
+            SELECT id, tenant_id, amount, frequency, start_date, end_date
+            FROM rent_agreements
+            WHERE tenant_id = ?
+            ORDER BY start_date DESC
+        """, (tenant_id,))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+# -------------------------
+# New Bill / Invoice functions
+# -------------------------
+
+def add_bill(property_id, tenant_id, start_date, end_date, created_date, note=""):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Safety check: tenant must belong to the selected property.
+    cursor.execute(
+        "SELECT 1 FROM tenants WHERE id = ? AND property_id = ?",
+        (tenant_id, property_id)
+    )
+    if cursor.fetchone() is None:
+        conn.close()
+        raise ValueError("The selected tenant does not belong to the selected property.")
+
+    cursor.execute("""
+        INSERT INTO bills
+        (property_id, tenant_id, start_date, end_date, created_date, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (property_id, tenant_id, start_date, end_date, created_date, note))
+
+    bill_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return bill_id
+
+
+def get_bills(property_id=None, tenant_id=None, year=None, month=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT
+            b.id,
+            b.property_id,
+            p.address,
+            b.tenant_id,
+            t.name,
+            b.start_date,
+            b.end_date,
+            b.created_date,
+            b.note,
+            COALESCE((
+                SELECT SUM(bc.amount)
+                FROM bill_charges bc
+                WHERE bc.bill_id = b.id
+            ), 0) AS total,
+            COALESCE((
+                SELECT SUM(bp.amount)
+                FROM bill_payments bp
+                WHERE bp.bill_id = b.id
+            ), 0) AS paid
+        FROM bills b
+        JOIN properties p ON p.id = b.property_id
+        JOIN tenants t ON t.id = b.tenant_id
+        WHERE 1 = 1
+    """
+    params = []
+
+    if property_id is not None:
+        query += " AND b.property_id = ?"
+        params.append(property_id)
+
+    if tenant_id is not None:
+        query += " AND b.tenant_id = ?"
+        params.append(tenant_id)
+
+    if year is not None and month is not None:
+        prefix = f"{int(year):04d}-{int(month):02d}"
+        query += " AND substr(b.start_date, 1, 7) = ?"
+        params.append(prefix)
+
+    query += " ORDER BY b.start_date DESC, b.id DESC"
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_bill(bill_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            b.id,
+            b.property_id,
+            p.address,
+            b.tenant_id,
+            t.name,
+            b.start_date,
+            b.end_date,
+            b.created_date,
+            b.note
+        FROM bills b
+        JOIN properties p ON p.id = b.property_id
+        JOIN tenants t ON t.id = b.tenant_id
+        WHERE b.id = ?
+    """, (bill_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_bill(bill_id, property_id, tenant_id, start_date, end_date, note=""):
+    conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        """
-        UPDATE properties
-        SET name = ?, address = ?
-        WHERE id = ?
-        """,
-        (name, address, property_id)
+        "SELECT 1 FROM tenants WHERE id = ? AND property_id = ?",
+        (tenant_id, property_id)
     )
+    if cursor.fetchone() is None:
+        conn.close()
+        raise ValueError("The selected tenant does not belong to the selected property.")
+
+    cursor.execute("""
+        UPDATE bills
+        SET property_id = ?, tenant_id = ?, start_date = ?, end_date = ?, note = ?
+        WHERE id = ?
+    """, (property_id, tenant_id, start_date, end_date, note, bill_id))
 
     conn.commit()
     conn.close()
 
 
-def get_tenants():
-
+def delete_bill(bill_id):
     conn = get_connection()
-
     cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT
-            tenants.id,
-            tenants.name,
-            tenants.phone,
-            tenants.email,
-            properties.name
-        FROM tenants
-        LEFT JOIN properties
-        ON tenants.property_id = properties.id
-        ORDER BY tenants.id DESC
-        """
-    )
-
-    rows = cursor.fetchall()
-
+    cursor.execute("DELETE FROM bills WHERE id = ?", (bill_id,))
+    conn.commit()
     conn.close()
 
+
+def add_bill_charge(bill_id, description, amount):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO bill_charges (bill_id, description, amount)
+        VALUES (?, ?, ?)
+    """, (bill_id, description, amount))
+    charge_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return charge_id
+
+
+def get_bill_charges(bill_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, description, amount
+        FROM bill_charges
+        WHERE bill_id = ?
+        ORDER BY id
+    """, (bill_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def update_bill_charge(charge_id, description, amount):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE bill_charges
+        SET description = ?, amount = ?
+        WHERE id = ?
+    """, (description, amount, charge_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_bill_charge(charge_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM bill_charges WHERE id = ?", (charge_id,))
+    conn.commit()
+    conn.close()
+
+
+def add_bill_payment(bill_id, amount, payment_date, note=""):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO bill_payments (bill_id, amount, payment_date, note)
+        VALUES (?, ?, ?, ?)
+    """, (bill_id, amount, payment_date, note))
+    payment_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return payment_id
+
+
+def get_bill_payments(bill_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, amount, payment_date, note
+        FROM bill_payments
+        WHERE bill_id = ?
+        ORDER BY payment_date, id
+    """, (bill_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def set_bill_paid(bill_id, amount, payment_date, note="Updated from Billing History"):
+    """Set the bill's total paid amount to exactly ``amount``.
+
+    The current Billing History UI edits the total paid amount directly,
+    so existing payment rows are replaced by one consolidated payment row.
+    If the amount is zero, all payment rows are removed.
+    """
+    amount = float(amount)
+    if amount < 0:
+        raise ValueError("Paid amount cannot be negative.")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            "SELECT 1 FROM bills WHERE id = ?",
+            (bill_id,)
+        )
+        if cursor.fetchone() is None:
+            raise ValueError("Bill not found.")
+
+        cursor.execute(
+            "DELETE FROM bill_payments WHERE bill_id = ?",
+            (bill_id,)
+        )
+
+        if amount > 0:
+            cursor.execute("""
+                INSERT INTO bill_payments
+                    (bill_id, amount, payment_date, note)
+                VALUES (?, ?, ?, ?)
+            """, (bill_id, amount, payment_date, note))
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# -------------------------
+# Legacy billing functions
+# Kept so other existing pages/code do not immediately break.
+# -------------------------
+
+def add_billing_period(property_id, start_date, end_date):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO billing_periods (property_id, start_date, end_date, status)
+        VALUES (?, ?, ?, 'Draft')
+    """, (property_id, start_date, end_date))
+    period_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return period_id
+
+
+def get_billing_periods(property_id=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if property_id is None:
+        cursor.execute("""
+            SELECT id, property_id, start_date, end_date, status
+            FROM billing_periods
+            ORDER BY start_date DESC
+        """)
+    else:
+        cursor.execute("""
+            SELECT id, property_id, start_date, end_date, status
+            FROM billing_periods
+            WHERE property_id = ?
+            ORDER BY start_date DESC
+        """, (property_id,))
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_billing_period(period_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, property_id, start_date, end_date, status
+        FROM billing_periods
+        WHERE id = ?
+    """, (period_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_billing_period(period_id, start_date, end_date):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE billing_periods
+        SET start_date = ?, end_date = ?
+        WHERE id = ?
+    """, (start_date, end_date, period_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_billing_period(period_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        DELETE FROM allocations
+        WHERE charge_id IN (
+            SELECT id FROM charges WHERE billing_period_id = ?
+        )
+    """, (period_id,))
+    cursor.execute("DELETE FROM charges WHERE billing_period_id = ?", (period_id,))
+    cursor.execute("DELETE FROM payments WHERE billing_period_id = ?", (period_id,))
+    cursor.execute("DELETE FROM billing_periods WHERE id = ?", (period_id,))
+
+    conn.commit()
+    conn.close()
+
+
+def billing_period_exists(property_id, start_date, end_date, exclude_period_id=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT id
+        FROM billing_periods
+        WHERE property_id = ?
+          AND start_date = ?
+          AND end_date = ?
+    """
+    params = [property_id, start_date, end_date]
+
+    if exclude_period_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_period_id)
+
+    cursor.execute(query, params)
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+
+def update_billing_period_status(period_id, status):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE billing_periods SET status = ? WHERE id = ?",
+        (status, period_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_charge(billing_period_id, description, amount):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO charges (billing_period_id, description, amount)
+        VALUES (?, ?, ?)
+    """, (billing_period_id, description, amount))
+    charge_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return charge_id
+
+
+def get_charges(billing_period_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, description, amount
+        FROM charges
+        WHERE billing_period_id = ?
+        ORDER BY id
+    """, (billing_period_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def get_charge(charge_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, billing_period_id, description, amount
+        FROM charges
+        WHERE id = ?
+    """, (charge_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+
+def update_charge(charge_id, description, amount):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE charges
+        SET description = ?, amount = ?
+        WHERE id = ?
+    """, (description, amount, charge_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_charge(charge_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM allocations WHERE charge_id = ?", (charge_id,))
+    cursor.execute("DELETE FROM charges WHERE id = ?", (charge_id,))
+    conn.commit()
+    conn.close()
+
+
+def add_allocation(charge_id, tenant_id, payer_type, amount):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO allocations
+        (charge_id, tenant_id, payer_type, amount)
+        VALUES (?, ?, ?, ?)
+    """, (charge_id, tenant_id, payer_type, amount))
+    allocation_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return allocation_id
+
+
+def get_allocations(charge_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, charge_id, tenant_id, payer_type, amount
+        FROM allocations
+        WHERE charge_id = ?
+        ORDER BY id
+    """, (charge_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def add_payment(tenant_id, billing_period_id, amount, payment_date, note=""):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO payments
+        (tenant_id, billing_period_id, amount, payment_date, note)
+        VALUES (?, ?, ?, ?, ?)
+    """, (tenant_id, billing_period_id, amount, payment_date, note))
+    payment_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return payment_id
+
+
+def get_payments(tenant_id=None, billing_period_id=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT id, tenant_id, billing_period_id, amount, payment_date, note
+        FROM payments
+        WHERE 1 = 1
+    """
+    params = []
+
+    if tenant_id is not None:
+        query += " AND tenant_id = ?"
+        params.append(tenant_id)
+
+    if billing_period_id is not None:
+        query += " AND billing_period_id = ?"
+        params.append(billing_period_id)
+
+    query += " ORDER BY payment_date DESC, id DESC"
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
     return rows

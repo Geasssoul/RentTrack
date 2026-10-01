@@ -1,240 +1,193 @@
 from PyQt6.QtWidgets import (
     QWidget,
-    QVBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QAbstractItemView,
-    QHeaderView
+    QMessageBox,
+    QHBoxLayout,
 )
 
 from database import (
+    create_database,
     add_property,
     get_properties,
-    update_property
+    update_property,
+    delete_property,
+    property_exists,
 )
+
+from ui.properties_ui import PropertiesUI
 
 
 class PropertiesPage(QWidget):
+    """Property business logic. UI widgets are defined in PropertiesUI."""
 
     def __init__(self):
         super().__init__()
 
-        self.selected_id = None
+        create_database()
+
+        self.ui = PropertiesUI(self)
+
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.addWidget(self.ui.root)
+
         self.properties = []
-
-        layout = QVBoxLayout(self)
-
-        # ===== 标题 =====
-        title = QLabel("Properties")
-        layout.addWidget(title)
-
-        # ===== 搜索 =====
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search Property...")
-        layout.addWidget(self.search_input)
-        self.search_input.textChanged.connect(self.search_properties)
-
-        # ===== 输入 =====
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Property Name")
-        layout.addWidget(self.name_input)
-
-        self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("Address")
-        layout.addWidget(self.address_input)
-
-        # ===== 按钮 =====
-        self.save_button = QPushButton("Save Property")
-        layout.addWidget(self.save_button)
-
-        # ===== Table =====
-        self.table = QTableWidget()
-
-        self.table.setColumnCount(2)
-
-        self.table.setHorizontalHeaderLabels([
-            "Property Name",
-            "Address"
-        ])
-
-        # 两列平均填满整个表格
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-
-        # 行号隐藏（推荐）
-        self.table.verticalHeader().setVisible(False)
-
-        # 一次只能选择一整行
-        self.table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
-
-        # 不允许一次选择多行
-        self.table.setSelectionMode(
-            QTableWidget.SelectionMode.SingleSelection
-        )
-
-        # 表格内容左对齐
-        self.table.setStyleSheet("""
-        QTableWidget::item{
-            padding:6px;
-        }
-        """)
-
-        layout.addWidget(self.table)
-
-        # ===== Events =====
-        self.save_button.clicked.connect(self.save_property)
-        self.table.cellDoubleClicked.connect(self.edit_property)
-
-        # ⭐ 新增这一行
-        self.table.itemChanged.connect(self.save_cell)
+        self.current_properties = []
+        self.editing_property_id = None
 
         self.load_properties()
 
-        # ===== Events =====
-        self.save_button.clicked.connect(self.save_property)
-        self.table.cellDoubleClicked.connect(self.edit_property)
-
-        self.load_properties()
+    # -------------------------
+    # Data loading
+    # -------------------------
 
     def load_properties(self):
-
         self.properties = get_properties()
+        self.apply_search()
 
-        # 暂时关闭 itemChanged 信号
-        self.table.blockSignals(True)
+    def apply_search(self):
+        keyword = self.ui.search_input.text().strip().lower()
 
-        self.display_properties(self.properties)
-
-        # 重新开启 itemChanged 信号
-        self.table.blockSignals(False)
-
-    def display_properties(self, properties):
-
-        self.current_properties = properties
-
-        self.table.setRowCount(len(properties))
-
-        for row, property in enumerate(properties):
-
-            self.table.setItem(
-                row,
-                0,
-                QTableWidgetItem(property[1])
-            )
-
-            self.table.setItem(
-                row,
-                1,
-                QTableWidgetItem(property[2] or "")
-            )
-
-    def save_property(self):
-
-        name = self.name_input.text().strip()
-        address = self.address_input.text().strip()
-
-        if name == "":
-            return
-
-        if self.selected_id is None:
-
-            add_property(name, address)
-
+        if not keyword:
+            self.current_properties = list(self.properties)
         else:
+            self.current_properties = [
+                property_data
+                for property_data in self.properties
+                if keyword in (property_data[1] or "").lower()
+            ]
 
-            update_property(
-                self.selected_id,
-                name,
-                address
-            )
-
-            self.selected_id = None
-            self.save_button.setText("Save Property")
-
-        self.name_input.clear()
-        self.address_input.clear()
-
-        self.load_properties()
-
-    def edit_property(self, row, column):
-
-        property = self.current_properties[row]
-
-        self.selected_id = property[0]
-
-        self.name_input.setText(property[1])
-        self.address_input.setText(property[2] or "")
-
-        self.save_button.setText("Update Property")
-    
-    def save_cell(self, item):
-
-        # 如果不是用户修改，不执行
-        if not hasattr(self, "current_properties"):
-            return
-
-        row = item.row()
-
-        if row >= len(self.current_properties):
-            return
-
-        property_id = self.current_properties[row][0]
-
-        name = self.table.item(row, 0).text()
-
-        address = self.table.item(row, 1).text()
-
-        update_property(
-            property_id,
-            name,
-            address
-        )
-
-    def display_properties(self, properties):
-
-        self.current_properties = properties
-
-        self.table.setRowCount(len(properties))
-
-        for row, property in enumerate(properties):
-
-            self.table.setItem(
-                row,
-                0,
-                QTableWidgetItem(property[1])
-            )
-
-            self.table.setItem(
-                row,
-                1,
-                QTableWidgetItem(property[2] or "")
-            )
-
+        self.ui.display_properties(self.current_properties)
 
     def search_properties(self):
+        self.apply_search()
 
-        keyword = self.search_input.text().lower().strip()
+    # -------------------------
+    # Add / Update
+    # -------------------------
 
-        if keyword == "":
+    def save_property(self):
+        address = self.ui.address_input.text().strip()
 
-            self.display_properties(self.properties)
-
+        if not address:
+            QMessageBox.warning(
+                self,
+                "Missing Address",
+                "Please enter a property address."
+            )
             return
 
-        filtered = []
+        if property_exists(
+            address,
+            exclude_property_id=self.editing_property_id
+        ):
+            QMessageBox.warning(
+                self,
+                "Duplicate Property",
+                "A property with this address already exists."
+            )
+            return
 
-        for property in self.properties:
+        try:
+            if self.editing_property_id is None:
+                add_property(address)
+            else:
+                update_property(
+                    self.editing_property_id,
+                    address
+                )
+        except ValueError as e:
+            QMessageBox.warning(
+                self,
+                "Duplicate Property",
+                str(e)
+            )
+            return
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Failed to save property:\n\n" + str(e)
+            )
+            return
 
-            name = property[1].lower()
-            address = (property[2] or "").lower()
+        self.cancel_edit()
+        self.load_properties()
 
-            if keyword in name or keyword in address:
-                filtered.append(property)
+    # -------------------------
+    # Edit
+    # -------------------------
 
-        self.display_properties(filtered)
+    def edit_property(self, property_id):
+        property_data = next(
+            (
+                item
+                for item in self.properties
+                if item[0] == property_id
+            ),
+            None
+        )
+
+        if property_data is None:
+            return
+
+        self.editing_property_id = property_id
+        self.ui.address_input.setText(
+            property_data[1] or ""
+        )
+        self.ui.address_input.setFocus()
+        self.ui.address_input.selectAll()
+        self.ui.set_edit_mode(True)
+
+    def cancel_edit(self):
+        self.editing_property_id = None
+        self.ui.address_input.clear()
+        self.ui.set_edit_mode(False)
+
+    # -------------------------
+    # Delete
+    # -------------------------
+
+    def delete_property(self, property_id):
+        property_data = next(
+            (
+                item
+                for item in self.properties
+                if item[0] == property_id
+            ),
+            None
+        )
+
+        if property_data is None:
+            return
+
+        address = property_data[1] or ""
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Property",
+            "Are you sure you want to delete this property?\n\n"
+            + address
+            + "\n\n"
+            "This will also delete tenants and bills belonging to this property.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            delete_property(property_id)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Failed to delete property:\n\n" + str(e)
+            )
+            return
+
+        if self.editing_property_id == property_id:
+            self.cancel_edit()
+
+        self.load_properties()

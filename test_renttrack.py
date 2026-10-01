@@ -1,0 +1,746 @@
+
+"""
+RentTrack functional database tests.
+
+IMPORTANT:
+- This test does NOT modify D:\RentTrack\data\rental.db.
+- It creates a temporary SQLite database under the system temp folder.
+- It does NOT test a user-facing Add Payment workflow. It does test the Paid/Outstanding edit feature.
+"""
+
+import os
+import shutil
+import sqlite3
+import tempfile
+from pathlib import Path
+
+
+import database as db
+
+
+PASSED = 0
+FAILED = 0
+
+
+def check(condition, message):
+    global PASSED, FAILED
+
+    if condition:
+        PASSED += 1
+        print(f"[PASS] {message}")
+    else:
+        FAILED += 1
+        print(f"[FAIL] {message}")
+
+
+def expect_error(func, message):
+    global PASSED, FAILED
+
+    try:
+        func()
+    except Exception:
+        PASSED += 1
+        print(f"[PASS] {message}")
+    else:
+        FAILED += 1
+        print(f"[FAIL] {message} -- expected an exception")
+
+
+def expect_error_contains(func, text, message):
+    global PASSED, FAILED
+
+    try:
+        func()
+    except Exception as exc:
+        if text.lower() in str(exc).lower():
+            PASSED += 1
+            print(f"[PASS] {message}")
+        else:
+            FAILED += 1
+            print(
+                f"[FAIL] {message} -- "
+                f"unexpected error: {exc}"
+            )
+    else:
+        FAILED += 1
+        print(f"[FAIL] {message} -- expected an exception")
+
+
+def property_addresses():
+    return [row[1] for row in db.get_properties()]
+
+
+def tenant_ids_for_property(property_id):
+    return [row[0] for row in db.get_tenants(property_id)]
+
+
+def bill_ids_for_property(property_id):
+    return [row[0] for row in db.get_bills(property_id=property_id)]
+
+
+def main():
+    global PASSED, FAILED
+
+    print("=" * 60)
+    print("RentTrack Functional Tests")
+    print("=" * 60)
+    print()
+    print("This test uses an isolated temporary database.")
+    print("Your real data/rental.db will NOT be changed.")
+    print()
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="renttrack_test_"))
+    test_db = temp_dir / "rental_test.db"
+
+    original_db_path = db.DB_PATH
+
+    try:
+        # ---------------------------------------------------------
+        # SETUP
+        # ---------------------------------------------------------
+        print("SETUP")
+        print("-" * 60)
+
+        # database.py uses DB_PATH as a Path. Replace it only for
+        # this test process so all database functions use the
+        # isolated temporary database.
+        db.DB_PATH = test_db
+
+        db.create_database()
+
+        check(test_db.exists(), "Temporary test database created")
+
+        # Verify the schema can be opened normally.
+        conn = db.get_connection()
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        conn.close()
+
+        check(integrity == "ok", "Initial SQLite integrity check")
+        print()
+
+        # ---------------------------------------------------------
+        # PROPERTY
+        # ---------------------------------------------------------
+        print("PROPERTY")
+        print("-" * 60)
+
+        property_a = db.add_property("12 Queen Street")
+        check(
+            property_a is not None,
+            "Add property"
+        )
+
+        check(
+            "12 Queen Street" in property_addresses(),
+            "Property address stored correctly"
+        )
+
+        expect_error(
+            lambda: db.add_property("12 Queen Street"),
+            "Duplicate property rejected"
+        )
+
+        expect_error(
+            lambda: db.add_property("12 QUEEN STREET"),
+            "Case-insensitive duplicate rejected"
+        )
+
+        expect_error(
+            lambda: db.add_property("   12 Queen Street   "),
+            "Whitespace duplicate rejected"
+        )
+
+        expect_error(
+            lambda: db.add_property(""),
+            "Empty property rejected"
+        )
+
+        property_b = db.add_property("88 King Street")
+        check(
+            property_b != property_a,
+            "Second property created separately"
+        )
+
+        db.update_property(property_a, "15 Queen Street")
+        check(
+            "15 Queen Street" in property_addresses(),
+            "Update property"
+        )
+        check(
+            "12 Queen Street" not in property_addresses(),
+            "Old property address removed after update"
+        )
+
+        check(
+            "88 King Street" in property_addresses(),
+            "Multiple properties remain separate"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # TENANT
+        # ---------------------------------------------------------
+        print("TENANT")
+        print("-" * 60)
+
+        tenant_a = db.add_tenant(
+            "Alice",
+            "0211111111",
+            "alice@example.com",
+            property_a,
+        )
+
+        # Current add_tenant implementation may return None.
+        tenants_a = db.get_tenants(property_a)
+
+        check(
+            len(tenants_a) == 1,
+            "Add tenant to Property A"
+        )
+
+        tenant_a_id = tenants_a[0][0]
+
+        tenant_b = db.add_tenant(
+            "Bob",
+            "0222222222",
+            "bob@example.com",
+            property_b,
+        )
+
+        tenants_b = db.get_tenants(property_b)
+
+        check(
+            len(tenants_b) == 1,
+            "Add tenant to Property B"
+        )
+
+        tenant_b_id = tenants_b[0][0]
+
+        check(
+            tenant_a_id not in tenant_ids_for_property(property_b),
+            "Tenant A is isolated from Property B"
+        )
+
+        check(
+            tenant_b_id not in tenant_ids_for_property(property_a),
+            "Tenant B is isolated from Property A"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # BILL
+        # ---------------------------------------------------------
+        print("BILL")
+        print("-" * 60)
+
+        bill_a = db.add_bill(
+            property_a,
+            tenant_a_id,
+            "2026-09-01",
+            "2026-09-30",
+            "2026-09-30",
+            "September test bill",
+        )
+
+        check(
+            bill_a is not None,
+            "Create Bill for Property A / Tenant A"
+        )
+
+        bill_row = db.get_bill(bill_a)
+
+        check(
+            bill_row is not None,
+            "Retrieve created Bill"
+        )
+
+        check(
+            bill_row[1] == property_a,
+            "Bill belongs to correct Property"
+        )
+
+        check(
+            bill_row[3] == tenant_a_id,
+            "Bill belongs to correct Tenant"
+        )
+
+        expect_error(
+            lambda: db.add_bill(
+                property_a,
+                tenant_b_id,
+                "2026-09-01",
+                "2026-09-30",
+                "2026-09-30",
+                "",
+            ),
+            "Bill rejects tenant from another property"
+        )
+
+        bill_b = db.add_bill(
+            property_b,
+            tenant_b_id,
+            "2026-09-01",
+            "2026-09-30",
+            "2026-09-30",
+            "September Property B bill",
+        )
+
+        check(
+            bill_b is not None and bill_b != bill_a,
+            "Create independent Bill for Property B"
+        )
+
+        check(
+            bill_a in bill_ids_for_property(property_a),
+            "Bill A appears under Property A"
+        )
+
+        check(
+            bill_a not in bill_ids_for_property(property_b),
+            "Bill A does not appear under Property B"
+        )
+
+        check(
+            bill_b in bill_ids_for_property(property_b),
+            "Bill B appears under Property B"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # CHARGES
+        # ---------------------------------------------------------
+        print("CHARGES")
+        print("-" * 60)
+
+        rent_charge = db.add_bill_charge(
+            bill_a,
+            "Rent",
+            500.00,
+        )
+
+        water_charge = db.add_bill_charge(
+            bill_a,
+            "Water",
+            50.80,
+        )
+
+        charges = db.get_bill_charges(bill_a)
+
+        check(
+            len(charges) == 2,
+            "Add two charges to Bill A"
+        )
+
+        total = sum(float(row[2]) for row in charges)
+
+        check(
+            abs(total - 550.80) < 0.001,
+            "Bill charge total calculated correctly"
+        )
+
+        db.update_bill_charge(
+            water_charge,
+            "Water",
+            60.80,
+        )
+
+        charges = db.get_bill_charges(bill_a)
+        updated_total = sum(float(row[2]) for row in charges)
+
+        check(
+            abs(updated_total - 560.80) < 0.001,
+            "Update charge amount"
+        )
+
+        db.delete_bill_charge(rent_charge)
+
+        charges = db.get_bill_charges(bill_a)
+
+        check(
+            len(charges) == 1,
+            "Delete charge"
+        )
+
+        check(
+            charges[0][1] == "Water"
+            and abs(float(charges[0][2]) - 60.80) < 0.001,
+            "Remaining charge is correct"
+        )
+
+        # Add rent again so the Bill has multiple charges for the
+        # later deletion/cascade tests.
+        db.add_bill_charge(
+            bill_a,
+            "Rent",
+            500.00,
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # PAID / OUTSTANDING
+        # ---------------------------------------------------------
+        print("PAID / OUTSTANDING")
+        print("-" * 60)
+
+        # Bill A currently totals $560.80.
+        bill_a_total = sum(
+            float(row[2]) for row in db.get_bill_charges(bill_a)
+        )
+
+        check(
+            abs(bill_a_total - 560.80) < 0.001,
+            "Paid/Outstanding test Bill total is correct"
+        )
+
+        check(
+            hasattr(db, "set_bill_paid"),
+            "set_bill_paid function exists"
+        )
+
+        # Simulate editing Paid to $100.00.
+        db.set_bill_paid(
+            bill_a,
+            100.00,
+            "2026-09-30",
+        )
+
+        payments = db.get_bill_payments(bill_a)
+        paid = sum(float(row[1] or 0) for row in payments)
+        outstanding = round(bill_a_total - paid, 2)
+
+        check(
+            abs(paid - 100.00) < 0.001,
+            "Paid can be changed to $100.00"
+        )
+
+        check(
+            abs(outstanding - 460.80) < 0.001,
+            "Outstanding recalculates to $460.80"
+        )
+
+        check(
+            abs((paid + outstanding) - bill_a_total) < 0.001,
+            "Paid + Outstanding equals Total after Paid edit"
+        )
+
+        # Simulate editing Outstanding to $20.00.
+        db.set_bill_paid(
+            bill_a,
+            round(bill_a_total - 20.00, 2),
+            "2026-09-30",
+        )
+
+        payments = db.get_bill_payments(bill_a)
+        paid = sum(float(row[1] or 0) for row in payments)
+        outstanding = round(bill_a_total - paid, 2)
+
+        check(
+            abs(outstanding - 20.00) < 0.001,
+            "Outstanding can be changed to $20.00"
+        )
+
+        check(
+            abs(paid - 540.80) < 0.001,
+            "Paid recalculates to $540.80"
+        )
+
+        check(
+            abs((paid + outstanding) - bill_a_total) < 0.001,
+            "Paid + Outstanding equals Total after Outstanding edit"
+        )
+
+        # Boundary values.
+        db.set_bill_paid(bill_a, 0.00, "2026-09-30")
+        payments = db.get_bill_payments(bill_a)
+        paid_zero = sum(float(row[1] or 0) for row in payments)
+
+        check(
+            abs(paid_zero - 0.00) < 0.001,
+            "Paid can be set to $0.00"
+        )
+
+        db.set_bill_paid(
+            bill_a,
+            bill_a_total,
+            "2026-09-30",
+        )
+        payments = db.get_bill_payments(bill_a)
+        paid_full = sum(float(row[1] or 0) for row in payments)
+
+        check(
+            abs(paid_full - bill_a_total) < 0.001,
+            "Paid can be set to the full Bill Total"
+        )
+
+        # Structural checks for the new Billing UI behaviour.
+        project_root = Path(__file__).resolve().parent
+        billing_source = project_root / "pages" / "billing.py"
+
+        if billing_source.exists():
+            billing_text = billing_source.read_text(encoding="utf-8")
+
+            check(
+                "QAbstractItemView.EditTrigger.DoubleClicked" in billing_text,
+                "Billing History supports double-click editing"
+            )
+
+            check(
+                "history_table.itemChanged.connect" in billing_text,
+                "Billing History handles edited cells"
+            )
+
+            check(
+                "if column not in (5, 6)" in billing_text,
+                "Only Paid and Outstanding are editable"
+            )
+
+            check(
+                "set_bill_paid(" in billing_text,
+                "Paid/Outstanding edits are saved through set_bill_paid"
+            )
+        else:
+            check(
+                False,
+                "Billing source file exists for Paid/Outstanding UI test"
+            )
+
+        print()
+
+        # ---------------------------------------------------------
+        # DATA ISOLATION
+        # ---------------------------------------------------------
+        print("DATA ISOLATION")
+        print("-" * 60)
+
+        property_a_bills = db.get_bills(property_id=property_a)
+        property_b_bills = db.get_bills(property_id=property_b)
+
+        check(
+            all(row[1] == property_a for row in property_a_bills),
+            "Property A Bill query returns only Property A"
+        )
+
+        check(
+            all(row[1] == property_b for row in property_b_bills),
+            "Property B Bill query returns only Property B"
+        )
+
+        tenant_a_bills = db.get_bills(
+            property_id=property_a,
+            tenant_id=tenant_a_id,
+        )
+
+        check(
+            all(row[3] == tenant_a_id for row in tenant_a_bills),
+            "Tenant filter isolates Bill records"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # TENANT DELETION RULE
+        # ---------------------------------------------------------
+        print("TENANT DELETION")
+        print("-" * 60)
+
+        # Tenant A already has a Bill, so deletion must be blocked.
+        expect_error_contains(
+            lambda: db.delete_tenant(tenant_a_id),
+            "Cannot delete this tenant",
+            "Tenant with historical Bills cannot be deleted"
+        )
+
+        check(
+            db.get_tenants(property_a),
+            "Tenant with Bills remains after rejected deletion"
+        )
+
+        # Create a temporary tenant without Bills and delete it.
+        db.add_tenant(
+            "Temporary Tenant",
+            "0200000000",
+            "temporary@example.com",
+            property_b,
+        )
+
+        temporary_tenants = [
+            row for row in db.get_tenants(property_b)
+            if row[1] == "Temporary Tenant"
+        ]
+
+        check(
+            len(temporary_tenants) == 1,
+            "Create tenant without Bills"
+        )
+
+        temporary_id = temporary_tenants[0][0]
+
+        db.delete_tenant(temporary_id)
+
+        check(
+            all(
+                row[0] != temporary_id
+                for row in db.get_tenants(property_b)
+            ),
+            "Tenant without Bills can be deleted"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # BILL DELETION
+        # ---------------------------------------------------------
+        print("BILL DELETION")
+        print("-" * 60)
+
+        charge_ids_before_delete = [
+            row[0] for row in db.get_bill_charges(bill_a)
+        ]
+
+        check(
+            len(charge_ids_before_delete) == 2,
+            "Bill A has charges before deletion"
+        )
+
+        db.delete_bill(bill_a)
+
+        check(
+            db.get_bill(bill_a) is None,
+            "Delete Bill"
+        )
+
+        check(
+            db.get_bill_charges(bill_a) == [],
+            "Bill charges are deleted with the Bill"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # PROPERTY DELETION
+        # ---------------------------------------------------------
+        print("PROPERTY DELETION")
+        print("-" * 60)
+
+        # Property B still has Tenant B + Bill B. Deleting the property
+        # should remove its dependent data.
+        check(
+            db.get_bill(bill_b) is not None,
+            "Property B Bill exists before Property deletion"
+        )
+
+        check(
+            len(db.get_tenants(property_b)) >= 1,
+            "Property B tenant exists before Property deletion"
+        )
+
+        db.delete_property(property_b)
+
+        check(
+            property_b not in [row[0] for row in db.get_properties()],
+            "Delete Property B"
+        )
+
+        check(
+            db.get_bill(bill_b) is None,
+            "Property deletion removes dependent Bills"
+        )
+
+        check(
+            db.get_tenants(property_b) == [],
+            "Property deletion removes dependent Tenants"
+        )
+
+        # Property A should remain untouched.
+        check(
+            property_a in [row[0] for row in db.get_properties()],
+            "Deleting one Property does not delete another Property"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # VALIDATION / CONSTRAINTS
+        # ---------------------------------------------------------
+        print("VALIDATION / CONSTRAINTS")
+        print("-" * 60)
+
+        expect_error(
+            lambda: db.add_property("15 QUEEN STREET"),
+            "Duplicate detection still works after other operations"
+        )
+
+        # The test database should now contain Property A and Tenant A,
+        # but no Bills because Bill A was deleted.
+        check(
+            len(db.get_bills(property_id=property_a)) == 0,
+            "Deleted Bill is absent from Property A history"
+        )
+
+        print()
+
+        # ---------------------------------------------------------
+        # DATABASE INTEGRITY
+        # ---------------------------------------------------------
+        print("DATABASE INTEGRITY")
+        print("-" * 60)
+
+        conn = db.get_connection()
+
+        integrity = conn.execute(
+            "PRAGMA integrity_check"
+        ).fetchone()[0]
+
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_keys"
+        ).fetchone()[0]
+
+        conn.close()
+
+        check(
+            integrity == "ok",
+            "SQLite integrity check"
+        )
+
+        check(
+            foreign_keys == 1,
+            "SQLite foreign-key enforcement is enabled"
+        )
+
+        print()
+
+    except Exception as exc:
+        FAILED += 1
+        print("[FAIL] Unexpected test error")
+        print(f"       {type(exc).__name__}: {exc}")
+        print()
+
+    finally:
+        db.DB_PATH = original_db_path
+
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception:
+            pass
+
+    print("=" * 60)
+
+    if FAILED == 0:
+        print(f"ALL FUNCTIONAL TESTS PASSED ({PASSED}/{PASSED})")
+    else:
+        print(
+            f"FUNCTIONAL TESTS FINISHED: "
+            f"{PASSED} passed, {FAILED} failed"
+        )
+
+    print("=" * 60)
+
+    return 0 if FAILED == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
